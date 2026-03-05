@@ -1,17 +1,23 @@
-﻿FROM node:20-alpine AS build
+FROM node:20-alpine AS build
 WORKDIR /app
 
-COPY package*.json ./
-RUN npm ci --include=dev
+COPY package.json ./
+
+RUN npm install --no-audit --no-fund
 
 COPY . .
+
 ARG VITE_API_BASE=
 ARG VITE_ADMIN_PATH_KEY=
+
 ENV VITE_API_BASE=${VITE_API_BASE}
 ENV VITE_ADMIN_PATH_KEY=${VITE_ADMIN_PATH_KEY}
+
 RUN npm run build
 
+
 FROM nginx:1.27-alpine
+
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/dist /usr/share/nginx/html
 
