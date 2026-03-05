@@ -28,8 +28,6 @@ coverage/
 !.env.*.example
 
 # ---- Sensitive runtime data ----
-backend/nodes.json
-backend/redeem_codes.json
 backend/app_config.json
 
 # ---- Docker local overrides ----
