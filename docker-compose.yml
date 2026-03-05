@@ -3,6 +3,8 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
     env_file:
       - ./backend/.env
     volumes:
@@ -10,13 +12,14 @@ services:
       - ./backend/redeem_codes.json:/app/redeem_codes.json
     restart: unless-stopped
     ports:
-      - "38081:38081"
+      - "127.0.0.1:38081:38081"
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
       args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
         VITE_API_BASE: ""
         VITE_ADMIN_PATH_KEY: ${VITE_ADMIN_PATH_KEY:-nuro-admin}
     depends_on:
