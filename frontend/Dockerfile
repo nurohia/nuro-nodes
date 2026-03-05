@@ -2,13 +2,8 @@ FROM node:20-alpine AS build
 WORKDIR /app
 
 COPY package.json ./
-ARG NPM_REGISTRY=https://registry.npmmirror.com
 
-RUN npm config set registry ${NPM_REGISTRY} \
- && npm config set fetch-retries 5 \
- && npm config set fetch-retry-mintimeout 20000 \
- && npm config set fetch-retry-maxtimeout 120000 \
- && npm install --no-audit --no-fund
+RUN npm install --no-audit --no-fund
 
 COPY . .
 
