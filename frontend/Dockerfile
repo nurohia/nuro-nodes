@@ -2,7 +2,7 @@
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm ci
+RUN npm ci --include=dev
 
 COPY . .
 ARG VITE_API_BASE=
