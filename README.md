@@ -106,7 +106,8 @@ rm -rf nuro-nodes
 - Trojon
 - Vless
 
-
+## 查询节点密码
+可以是XUI面板的备注或者节点密码，Vmess节点密码是UUID
 ## 安全建议
 - 不要把真实生产数据（节点地址、真实兑换码）长期放在公开仓库。
 - 生产环境建议仅使用 `ADMIN_TOKEN_SHA256`。
