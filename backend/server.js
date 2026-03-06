@@ -21,6 +21,7 @@ const ADMIN_API_BASE = ADMIN_PATH_KEY ? `/api/internal/${ADMIN_PATH_KEY}` : '';
 const ADMIN_SESSION_SECRET = String(process.env.ADMIN_SESSION_SECRET || '').trim();
 const ADMIN_SESSION_TTL_HOURS = Number(process.env.ADMIN_SESSION_TTL_HOURS || 12);
 const ADMIN_SESSION_COOKIE = 'nexus_admin_session';
+let runtimeAdminTokenSha256 = ADMIN_TOKEN_SHA256 || (ADMIN_TOKEN ? hashSha256(ADMIN_TOKEN) : '');
 
 const corsWhitelist = (process.env.CORS_WHITELIST || 'http://localhost:38173')
   .split(',')
@@ -94,9 +95,12 @@ function parseCookieHeader(cookieHeader) {
 
 function getAdminSessionSecret() {
   if (ADMIN_SESSION_SECRET) return ADMIN_SESSION_SECRET;
-  if (ADMIN_TOKEN_SHA256) return ADMIN_TOKEN_SHA256;
-  if (ADMIN_TOKEN) return hashSha256(ADMIN_TOKEN);
+  if (runtimeAdminTokenSha256) return runtimeAdminTokenSha256;
   return '';
+}
+
+function hasAdminTokenConfigured() {
+  return Boolean(runtimeAdminTokenSha256);
 }
 
 function signSessionPayload(payloadBase64) {
@@ -222,7 +226,7 @@ async function loadCodes() {
   try {
     const content = await fs.readFile(CODE_FILE, 'utf8');
     const codes = JSON.parse(String(content || '').replace(/^\uFEFF/, ''));
-    return Array.isArray(codes) ? codes : [];
+    return Array.isArray(codes) ? codes.map((item) => normalizeCodeItem(item)) : [];
   } catch (e) {
     if (e.code === 'ENOENT') return [];
     throw e;
@@ -239,16 +243,23 @@ async function loadAppConfig() {
     const parsed = JSON.parse(String(content || '').replace(/^\uFEFF/, ''));
     return {
       purchase_url: String(parsed?.purchase_url || '').trim(),
+      admin_token_sha256: String(parsed?.admin_token_sha256 || '').trim().toLowerCase(),
     };
   } catch (e) {
-    if (e.code === 'ENOENT') return { purchase_url: '' };
+    if (e.code === 'ENOENT') return { purchase_url: '', admin_token_sha256: '' };
     throw e;
   }
 }
 
 async function saveAppConfig(config) {
+  const prev = await loadAppConfig().catch(() => ({ purchase_url: '', admin_token_sha256: '' }));
   const normalized = {
-    purchase_url: String(config?.purchase_url || '').trim(),
+    purchase_url:
+      config?.purchase_url === undefined ? String(prev.purchase_url || '').trim() : String(config?.purchase_url || '').trim(),
+    admin_token_sha256:
+      config?.admin_token_sha256 === undefined
+        ? String(prev.admin_token_sha256 || '').trim().toLowerCase()
+        : String(config?.admin_token_sha256 || '').trim().toLowerCase(),
   };
   await fs.writeFile(APP_CONFIG_FILE, `${JSON.stringify(normalized, null, 2)}\n`, 'utf8');
 }
@@ -305,6 +316,16 @@ function normalizeDomainInput(input) {
   return host.toLowerCase();
 }
 
+function normalizeCodeItem(item) {
+  const code = String(item?.code || '').trim().toUpperCase();
+  return {
+    ...item,
+    code,
+    node_host: normalizeDomainInput(item?.node_host || ''),
+    node_name: String(item?.node_name || '').trim(),
+  };
+}
+
 function pickNodesByDomain(nodes, domainInput) {
   const host = normalizeDomainInput(domainInput);
   if (!host) return [];
@@ -337,16 +358,15 @@ function buildUserResult(inbound, node, creds) {
 function isValidAdminToken(rawToken) {
   const token = String(rawToken || '').trim();
   if (!token) return false;
-  if (ADMIN_TOKEN_SHA256) return safeCompare(hashSha256(token), ADMIN_TOKEN_SHA256);
-  if (ADMIN_TOKEN) return safeCompare(token, ADMIN_TOKEN);
-  return false;
+  if (!runtimeAdminTokenSha256) return false;
+  return safeCompare(hashSha256(token), runtimeAdminTokenSha256);
 }
 
 function requireAdminSession(req, res, next) {
   if (!ADMIN_PATH_KEY || !ADMIN_API_BASE) {
     return res.status(503).json({ message: '管理员路径未配置，请设置 ADMIN_PATH_KEY' });
   }
-  if (!ADMIN_TOKEN && !ADMIN_TOKEN_SHA256) {
+  if (!hasAdminTokenConfigured()) {
     return res.status(503).json({ message: '管理员令牌未配置，请设置 ADMIN_TOKEN 或 ADMIN_TOKEN_SHA256' });
   }
   const cookies = parseCookieHeader(req.headers.cookie);
@@ -528,6 +548,10 @@ app.post('/api/node/renew', renewLimiter, async (req, res) => {
   if (!codeItem || codeItem.revoked || codeItem.used) {
     return res.status(401).json({ message: '兑换码无效或已使用' });
   }
+  const renewHost = normalizeDomainInput(nodeDomain);
+  if (codeItem.node_host && codeItem.node_host !== renewHost) {
+    return res.status(403).json({ message: '该兑换码不可用于当前节点' });
+  }
 
   let nodes;
   try {
@@ -582,11 +606,36 @@ app.get('/api/public/meta', async (req, res) => {
   }
 });
 
+app.post(`${ADMIN_API_BASE}/auth/update-token`, adminLimiter, requireAdminSession, async (req, res) => {
+  const nextToken = String(req.body?.token || '').trim();
+  if (nextToken.length < 8) {
+    return res.status(400).json({ message: '新令牌长度至少 8 位' });
+  }
+
+  const prevHash = runtimeAdminTokenSha256;
+  const nextHash = hashSha256(nextToken);
+  runtimeAdminTokenSha256 = nextHash;
+
+  try {
+    await saveAppConfig({ admin_token_sha256: nextHash });
+    res.clearCookie(ADMIN_SESSION_COOKIE, {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: String(process.env.NODE_ENV || '').toLowerCase() === 'production',
+      path: ADMIN_API_BASE,
+    });
+    return res.status(200).json({ message: '管理员令牌已更新，请重新登录' });
+  } catch (e) {
+    runtimeAdminTokenSha256 = prevHash;
+    return res.status(500).json({ message: '更新管理员令牌失败' });
+  }
+});
+
 app.post(`${ADMIN_API_BASE}/auth/login`, adminLimiter, async (req, res) => {
   if (!ADMIN_PATH_KEY || !ADMIN_API_BASE) {
     return res.status(503).json({ message: '管理员路径未配置，请设置 ADMIN_PATH_KEY' });
   }
-  if (!ADMIN_TOKEN && !ADMIN_TOKEN_SHA256) {
+  if (!hasAdminTokenConfigured()) {
     return res.status(503).json({ message: '管理员令牌未配置，请设置 ADMIN_TOKEN 或 ADMIN_TOKEN_SHA256' });
   }
 
@@ -720,8 +769,14 @@ app.post(`${ADMIN_API_BASE}/codes/generate`, adminLimiter, requireAdminSession, 
   const count = Math.min(200, Math.max(1, Number(req.body?.count || 1)));
   const months = Math.min(12, Math.max(1, Number(req.body?.months || 1)));
   const prefix = String(req.body?.prefix || 'NX').trim().slice(0, 8) || 'NX';
+  const nodeHost = normalizeDomainInput(req.body?.node_host || '');
+  if (!nodeHost) return res.status(400).json({ message: 'node_host 不能为空' });
 
   try {
+    const nodes = await loadNodes();
+    const bindNode = nodes.find((node) => getUrlHost(node.url).toLowerCase() === nodeHost);
+    if (!bindNode) return res.status(400).json({ message: '绑定节点不存在或已变更' });
+
     const codes = await loadCodes();
     const now = new Date().toISOString();
     const created = [];
@@ -734,6 +789,8 @@ app.post(`${ADMIN_API_BASE}/codes/generate`, adminLimiter, requireAdminSession, 
       const item = {
         code,
         months,
+        node_host: nodeHost,
+        node_name: bindNode.name,
         used: false,
         revoked: false,
         created_at: now,
@@ -772,11 +829,25 @@ app.post(`${ADMIN_API_BASE}/codes/revoke`, adminLimiter, requireAdminSession, as
 app.post(`${ADMIN_API_BASE}/codes/cleanup`, adminLimiter, requireAdminSession, async (req, res) => {
   try {
     const codes = await loadCodes();
-    const before = codes.length;
-    const kept = codes.filter((item) => !item.used && !item.revoked);
-    const removed = before - kept.length;
-    await saveCodes(kept);
-    return res.status(200).json({ message: '清理完成', removed, total: kept.length });
+    const scopedCodesRaw = Array.isArray(req.body?.codes) ? req.body.codes : null;
+    const scopedSet = scopedCodesRaw
+      ? new Set(scopedCodesRaw.map((c) => String(c || '').trim().toUpperCase()).filter(Boolean))
+      : null;
+
+    const next = [];
+    let removed = 0;
+    codes.forEach((item) => {
+      const code = String(item.code || '').toUpperCase();
+      const inScope = scopedSet ? scopedSet.has(code) : true;
+      if (inScope && (item.used || item.revoked)) {
+        removed += 1;
+        return;
+      }
+      next.push(item);
+    });
+
+    await saveCodes(next);
+    return res.status(200).json({ message: '清理完成', removed, total: next.length });
   } catch (e) {
     return res.status(500).json({ message: '清理兑换码失败' });
   }
@@ -800,8 +871,18 @@ app.post(`${ADMIN_API_BASE}/codes/delete`, adminLimiter, requireAdminSession, as
 
 app.post(`${ADMIN_API_BASE}/codes/delete-all`, adminLimiter, requireAdminSession, async (req, res) => {
   try {
-    await saveCodes([]);
-    return res.status(200).json({ message: '已删除全部兑换码', total: 0 });
+    const scopedCodesRaw = Array.isArray(req.body?.codes) ? req.body.codes : null;
+    if (!scopedCodesRaw) {
+      await saveCodes([]);
+      return res.status(200).json({ message: '已删除全部兑换码', total: 0, removed: -1 });
+    }
+
+    const scopedSet = new Set(scopedCodesRaw.map((c) => String(c || '').trim().toUpperCase()).filter(Boolean));
+    const codes = await loadCodes();
+    const next = codes.filter((item) => !scopedSet.has(String(item.code || '').toUpperCase()));
+    const removed = codes.length - next.length;
+    await saveCodes(next);
+    return res.status(200).json({ message: '已删除选中兑换码', total: next.length, removed });
   } catch (e) {
     return res.status(500).json({ message: '删除全部兑换码失败' });
   }
@@ -810,7 +891,7 @@ app.post(`${ADMIN_API_BASE}/codes/delete-all`, adminLimiter, requireAdminSession
 app.get(`${ADMIN_API_BASE}/settings`, adminLimiter, requireAdminSession, async (req, res) => {
   try {
     const config = await loadAppConfig();
-    return res.status(200).json(config);
+    return res.status(200).json({ purchase_url: config.purchase_url });
   } catch (e) {
     return res.status(500).json({ message: '读取站点配置失败' });
   }
@@ -844,6 +925,17 @@ app.use((err, req, res, next) => {
   return res.status(500).json({ message: '服务器内部错误' });
 });
 
-app.listen(PORT, () => {
-  console.log(`BFF gateway listening on port ${PORT}`);
-});
+async function bootstrapAndStart() {
+  try {
+    const config = await loadAppConfig();
+    if (config.admin_token_sha256) {
+      runtimeAdminTokenSha256 = config.admin_token_sha256;
+    }
+  } catch (_) {}
+
+  app.listen(PORT, () => {
+    console.log(`BFF gateway listening on port ${PORT}`);
+  });
+}
+
+bootstrapAndStart();
