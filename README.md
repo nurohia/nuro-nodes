@@ -50,7 +50,7 @@ cd nuro-nodes
 必须确认：
 - `backend/.env` 里的 `ADMIN_PATH_KEY`
 - `backend/.env` 里的 `ADMIN_TOKEN`（或 `ADMIN_TOKEN_SHA256`）
-- `CORS_WHITELIST` 为你的服务器IP
+- `CORS_WHITELIST` 为你的服务器IP,如果反代需要加上域名例如CORS_WHITELIST=https://panel.example.com,http://127.0.0.1:38173
 
 ### 3) 启动容器
 ```bash
