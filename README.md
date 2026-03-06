@@ -92,7 +92,23 @@ cd ~
 rm -rf nuro-nodes
 ```
 
+## 支持的X-UI
+
+### 一键命令(不支持3-UI)
+`bash <(curl -Ls https://raw.githubusercontent.com/vaxilu/x-ui/master/install.sh)`
+
+### 支持的协议
+- Shadowsocks
+- HTTP
+- SOCKS
+- Vmess
+### 不支持的协议(因为XUI太久，新版Xray不支持)
+- Trojon
+- Vless
+
+
 ## 安全建议
 - 不要把真实生产数据（节点地址、真实兑换码）长期放在公开仓库。
 - 生产环境建议仅使用 `ADMIN_TOKEN_SHA256`。
 - 建议配合 HTTPS 与反向代理。
+

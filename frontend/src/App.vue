@@ -150,8 +150,8 @@
                 <article v-for="(node, index) in adminNodes" :key="`node-${index}`" class="node-card">
                   <div class="node-header">
                     <strong>节点 {{ index + 1 }}</strong>
-                    <span class="badge" :class="healthClass(nodeHealthId(node, index))">
-                      {{ healthText(nodeHealthId(node, index)) }}
+                    <span class="badge" :class="nodeStatusClass(node, index)">
+                      {{ nodeStatusText(node, index) }}
                     </span>
                   </div>
 
@@ -445,6 +445,49 @@ function normalizeHost(input) {
   return String(host || '').toLowerCase();
 }
 
+function normalizeNodeNameForCompare(input) {
+  return String(input || '').trim().toLowerCase();
+}
+
+function normalizeNodeUrlForCompare(input) {
+  const raw = String(input || '').trim();
+  if (!raw) return '';
+  try {
+    const u = new URL(raw);
+    const pathPart = String(u.pathname || '/').replace(/\/+$/, '') || '/';
+    return `${u.protocol.toLowerCase()}//${u.host.toLowerCase()}${pathPart}`;
+  } catch (_) {
+    return '';
+  }
+}
+
+function findDuplicateNodeMessage(nodes) {
+  const nameMap = new Map();
+  const urlMap = new Map();
+
+  for (let i = 0; i < nodes.length; i += 1) {
+    const node = nodes[i] || {};
+    const nameKey = normalizeNodeNameForCompare(node.name);
+    const urlKey = normalizeNodeUrlForCompare(node.url);
+
+    if (nameKey) {
+      if (nameMap.has(nameKey)) {
+        return `节点名称重复：第 ${i + 1} 个与第 ${nameMap.get(nameKey) + 1} 个节点名称相同`;
+      }
+      nameMap.set(nameKey, i);
+    }
+
+    if (urlKey) {
+      if (urlMap.has(urlKey)) {
+        return `x-ui 地址重复：第 ${i + 1} 个与第 ${urlMap.get(urlKey) + 1} 个节点地址相同`;
+      }
+      urlMap.set(urlKey, i);
+    }
+  }
+
+  return '';
+}
+
 function nodeHealthId(node, index) {
   const fromUrl = (() => {
     try {
@@ -720,6 +763,11 @@ async function restoreAdminSession() {
 
 async function saveNodes() {
   if (!adminReady.value || adminBusy.value) return;
+  const duplicateMsg = findDuplicateNodeMessage(adminNodes.value || []);
+  if (duplicateMsg) {
+    showToast(duplicateMsg);
+    return;
+  }
   adminBusy.value = true;
 
   try {
@@ -729,11 +777,20 @@ async function saveNodes() {
       credentials: 'include',
       body: JSON.stringify({ nodes: adminNodes.value }),
     });
-    if (!resp.ok) throw new Error(String(resp.status));
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      const err = new Error(String(resp.status));
+      err.detail = String(data?.message || '').trim();
+      throw err;
+    }
+    if (Array.isArray(data?.nodes)) {
+      adminNodes.value = data.nodes;
+    }
     savedNodesSnapshot.value = JSON.stringify(adminNodes.value || []);
+    await fetchCodes();
     showToast('节点配置已保存');
   } catch (err) {
-    showToast(mapAdminError(Number(err.message || 0)));
+    showToast(String(err?.detail || '').trim() || mapAdminError(Number(err.message || 0)));
   } finally {
     adminBusy.value = false;
   }
@@ -1063,5 +1120,15 @@ function healthClass(key) {
   const item = healthMap.value[key];
   if (!item) return 'idle';
   return item.ok ? 'ok' : 'bad';
+}
+
+function nodeStatusText(node, index) {
+  if (!String(node?.id || '').trim()) return '未保存';
+  return healthText(nodeHealthId(node, index));
+}
+
+function nodeStatusClass(node, index) {
+  if (!String(node?.id || '').trim()) return 'idle';
+  return healthClass(nodeHealthId(node, index));
 }
 </script>

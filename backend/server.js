@@ -150,28 +150,107 @@ function bytesToGb(bytes) {
   return (Number(bytes || 0) / 1024 / 1024 / 1024).toFixed(2);
 }
 
-function parseClientCredentials(settingsRaw) {
-  let parsed;
+function parseJsonObject(raw) {
+  if (!raw) return {};
+  if (typeof raw === 'object') return raw || {};
   try {
-    parsed = typeof settingsRaw === 'string' ? JSON.parse(settingsRaw) : settingsRaw || {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
   } catch (e) {
-    return null;
+    return {};
   }
-
-  if (parsed.method && parsed.password) {
-    return { method: parsed.method, password: parsed.password };
-  }
-
-  const clients = Array.isArray(parsed.clients) ? parsed.clients : [];
-  const first = clients.find((c) => c && c.password && (c.method || parsed.method));
-  if (!first) return null;
-  return { method: first.method || parsed.method, password: first.password };
 }
 
 function buildShadowsocksLink(method, password, host, port, remark) {
   const plain = `${method}:${password}@${host}:${port}`;
   const encoded = Buffer.from(plain).toString('base64');
   return `ss://${encoded}#${encodeURIComponent(remark || 'subscription')}`;
+}
+
+function encodeBase64UrlJson(obj) {
+  return Buffer.from(JSON.stringify(obj), 'utf8').toString('base64');
+}
+
+function encodeBase64PrettyJson(obj) {
+  return Buffer.from(JSON.stringify(obj, null, 2), 'utf8').toString('base64');
+}
+
+function parseInboundProfile(inbound) {
+  const protocol = String(inbound?.protocol || '').trim().toLowerCase();
+  const settings = parseJsonObject(inbound?.settings);
+  const streamSettings = parseJsonObject(inbound?.streamSettings);
+  const clients = Array.isArray(settings.clients) ? settings.clients.filter(Boolean) : [];
+  const firstClient = clients[0] || {};
+  const firstAccount = Array.isArray(settings.accounts) ? settings.accounts[0] || {} : {};
+
+  const candidates = new Set();
+  const remark = String(inbound?.remark || '').trim();
+  if (remark) candidates.add(remark);
+
+  if (protocol === 'shadowsocks') {
+    const method = String(settings.method || firstClient.method || '').trim();
+    const password = String(settings.password || firstClient.password || '').trim();
+    if (password) candidates.add(password);
+    return {
+      protocol,
+      method,
+      password,
+      authCandidates: Array.from(candidates),
+      streamSettings,
+    };
+  }
+
+  if (protocol === 'vmess' || protocol === 'vless') {
+    const id = String(firstClient.id || '').trim();
+    const email = String(firstClient.email || '').trim();
+    if (id) candidates.add(id);
+    if (email) candidates.add(email);
+    return {
+      protocol,
+      id,
+      email,
+      flow: String(firstClient.flow || '').trim(),
+      security: String(firstClient.security || '').trim(),
+      alterId: Number(firstClient.alterId || 0),
+      authCandidates: Array.from(candidates),
+      streamSettings,
+    };
+  }
+
+  if (protocol === 'trojan') {
+    const password = String(firstClient.password || '').trim();
+    const email = String(firstClient.email || '').trim();
+    if (password) candidates.add(password);
+    if (email) candidates.add(email);
+    return {
+      protocol,
+      password,
+      email,
+      flow: String(firstClient.flow || '').trim(),
+      authCandidates: Array.from(candidates),
+      streamSettings,
+    };
+  }
+
+  if (protocol === 'socks' || protocol === 'http') {
+    const user = String(firstAccount.user || '').trim();
+    const pass = String(firstAccount.pass || '').trim();
+    if (user) candidates.add(user);
+    if (pass) candidates.add(pass);
+    return {
+      protocol,
+      user,
+      pass,
+      authCandidates: Array.from(candidates),
+      streamSettings,
+    };
+  }
+
+  return {
+    protocol,
+    authCandidates: Array.from(candidates),
+    streamSettings,
+  };
 }
 
 function getUrlHost(rawUrl) {
@@ -209,6 +288,46 @@ function normalizeNode(input, index) {
   }
 
   return node;
+}
+
+function normalizeNodeNameForCompare(name) {
+  return String(name || '').trim().toLowerCase();
+}
+
+function normalizeNodeUrlForCompare(rawUrl) {
+  try {
+    const u = new URL(String(rawUrl || '').trim());
+    const pathPart = String(u.pathname || '/').replace(/\/+$/, '') || '/';
+    return `${u.protocol.toLowerCase()}//${u.host.toLowerCase()}${pathPart}`;
+  } catch (e) {
+    return '';
+  }
+}
+
+function validateNodeUniqueness(nodes) {
+  const nameMap = new Map();
+  const urlMap = new Map();
+
+  nodes.forEach((node, index) => {
+    const nameKey = normalizeNodeNameForCompare(node?.name);
+    const urlKey = normalizeNodeUrlForCompare(node?.url);
+
+    if (nameKey) {
+      if (nameMap.has(nameKey)) {
+        const prevIndex = nameMap.get(nameKey);
+        throw new Error(`节点名称重复：第 ${index + 1} 个与第 ${prevIndex + 1} 个节点名称相同`);
+      }
+      nameMap.set(nameKey, index);
+    }
+
+    if (urlKey) {
+      if (urlMap.has(urlKey)) {
+        const prevIndex = urlMap.get(urlKey);
+        throw new Error(`x-ui 地址重复：第 ${index + 1} 个与第 ${prevIndex + 1} 个节点地址相同`);
+      }
+      urlMap.set(urlKey, index);
+    }
+  });
 }
 
 async function loadNodes() {
@@ -321,9 +440,82 @@ function normalizeCodeItem(item) {
   return {
     ...item,
     code,
+    node_id: String(item?.node_id || '').trim(),
     node_host: normalizeDomainInput(item?.node_host || ''),
     node_name: String(item?.node_name || '').trim(),
   };
+}
+
+function createNodeId(usedIds) {
+  let id = '';
+  do {
+    id = `node_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
+  } while (usedIds.has(id));
+  return id;
+}
+
+function ensureNodeIds(nextNodes, prevNodes = []) {
+  const usedIds = new Set();
+
+  return nextNodes.map((node, index) => {
+    const next = { ...node };
+    const ownId = String(next.id || '').trim();
+    const prevId = String(prevNodes[index]?.id || '').trim();
+    if (ownId && !usedIds.has(ownId)) {
+      next.id = ownId;
+      usedIds.add(next.id);
+      return next;
+    }
+    if (prevId && !usedIds.has(prevId)) {
+      next.id = prevId;
+      usedIds.add(next.id);
+      return next;
+    }
+    next.id = createNodeId(usedIds);
+    usedIds.add(next.id);
+    return next;
+  });
+}
+
+function syncCodesWithNodes(codes, prevNodes, nextNodes) {
+  const nextById = new Map();
+  const nextByHost = new Map();
+  nextNodes.forEach((node) => {
+    const id = String(node?.id || '').trim();
+    const host = normalizeDomainInput(node?.url || '');
+    if (!id) return;
+    nextById.set(id, node);
+    if (host) nextByHost.set(host, node);
+  });
+
+  const legacyHostToNodeId = new Map();
+  prevNodes.forEach((prevNode, index) => {
+    const prevHost = normalizeDomainInput(prevNode?.url || '');
+    const targetId = String(nextNodes[index]?.id || prevNode?.id || '').trim();
+    if (prevHost && targetId) legacyHostToNodeId.set(prevHost, targetId);
+  });
+
+  return codes.map((rawItem) => {
+    const item = normalizeCodeItem(rawItem);
+    let bindNode = null;
+
+    if (item.node_id && nextById.has(item.node_id)) {
+      bindNode = nextById.get(item.node_id);
+    } else if (item.node_host && nextByHost.has(item.node_host)) {
+      bindNode = nextByHost.get(item.node_host);
+    } else if (item.node_host && legacyHostToNodeId.has(item.node_host)) {
+      const mappedId = legacyHostToNodeId.get(item.node_host);
+      bindNode = mappedId ? nextById.get(mappedId) || null : null;
+    }
+
+    if (!bindNode) return item;
+    return {
+      ...item,
+      node_id: String(bindNode.id || '').trim(),
+      node_host: normalizeDomainInput(bindNode.url || ''),
+      node_name: String(bindNode.name || '').trim(),
+    };
+  });
 }
 
 function pickNodesByDomain(nodes, domainInput) {
@@ -332,26 +524,124 @@ function pickNodesByDomain(nodes, domainInput) {
   return nodes.filter((n) => getUrlHost(n.url).toLowerCase() === host);
 }
 
-function inboundMatches(item, queryKey) {
-  if (!item?.enable) return false;
-  const byRemark = String(item.remark || '') === queryKey;
-  const creds = parseClientCredentials(item.settings);
-  const byPass = String(creds?.password || '') === queryKey;
-  return byRemark || byPass;
+function resolveTransport(streamSettings) {
+  const stream = streamSettings || {};
+  const transport = String(stream.network || 'tcp').trim().toLowerCase();
+  const security = String(stream.security || '').trim().toLowerCase();
+  const isTls = security === 'tls' || security === 'reality';
+  const tcpHeaderType = String(stream?.tcpSettings?.header?.type || '').trim().toLowerCase();
+  const wsHost = String(stream?.wsSettings?.headers?.Host || '').trim();
+  const httpHostRaw = stream?.httpSettings?.host;
+  const httpHost = Array.isArray(httpHostRaw) ? httpHostRaw.filter(Boolean).join(',') : String(httpHostRaw || '').trim();
+  const tcpHostRaw = stream?.tcpSettings?.header?.request?.headers?.Host;
+  const tcpHost = Array.isArray(tcpHostRaw) ? tcpHostRaw.filter(Boolean).join(',') : String(tcpHostRaw || '').trim();
+  const grpcAuthority = String(stream?.grpcSettings?.authority || '').trim();
+  const host = String(
+    wsHost ||
+      httpHost ||
+      grpcAuthority ||
+      tcpHost ||
+      ''
+  ).trim();
+  const wsPath = String(stream?.wsSettings?.path || '').trim();
+  const httpPath = String(stream?.httpSettings?.path || '').trim();
+  const grpcServiceName = String(stream?.grpcSettings?.serviceName || '').trim();
+  const path = String(wsPath || httpPath || grpcServiceName || '').trim();
+  const sni = String(stream?.tlsSettings?.serverName || stream?.realitySettings?.serverName || '').trim();
+  return { transport, security, isTls, host, path, sni, tcpHeaderType };
 }
 
-function buildUserResult(inbound, node, creds) {
+function buildProtocolLink(inbound, host, profile) {
+  const protocol = profile.protocol;
+  const port = Number(inbound?.port || 0);
+  const remark = String(inbound?.remark || 'subscription');
+  const t = resolveTransport(profile.streamSettings);
+
+  if (!host || !Number.isFinite(port) || port <= 0) return '';
+
+  if (protocol === 'shadowsocks') {
+    if (!profile.method || !profile.password) return '';
+    return buildShadowsocksLink(profile.method, profile.password, host, port, remark);
+  }
+
+  if (protocol === 'vmess') {
+    if (!profile.id) return '';
+    const vmessType = t.transport === 'tcp' ? t.tcpHeaderType || 'none' : 'none';
+    const vmessObj = {
+      v: '2',
+      ps: remark,
+      add: host,
+      port,
+      id: profile.id,
+      aid: Number(profile.alterId || 0),
+      net: t.transport || 'tcp',
+      type: vmessType,
+      host: t.host || '',
+      path: t.path || '',
+      tls: t.isTls ? 'tls' : 'none',
+    };
+    return `vmess://${encodeBase64PrettyJson(vmessObj)}`;
+  }
+
+  if (protocol === 'vless') {
+    if (!profile.id) return '';
+    const params = new URLSearchParams();
+    params.set('encryption', 'none');
+    params.set('security', t.security || 'none');
+    params.set('type', t.transport || 'tcp');
+    if (profile.flow) params.set('flow', profile.flow);
+    if (t.host) params.set('host', t.host);
+    if (t.path) params.set('path', t.path);
+    if (t.sni) params.set('sni', t.sni);
+    return `vless://${encodeURIComponent(profile.id)}@${host}:${port}?${params.toString()}#${encodeURIComponent(remark)}`;
+  }
+
+  if (protocol === 'trojan') {
+    if (!profile.password) return '';
+    const params = new URLSearchParams();
+    params.set('security', t.security || 'none');
+    params.set('type', t.transport || 'tcp');
+    if (profile.flow) params.set('flow', profile.flow);
+    if (t.host) params.set('host', t.host);
+    if (t.path) params.set('path', t.path);
+    if (t.sni) params.set('sni', t.sni);
+    return `trojan://${encodeURIComponent(profile.password)}@${host}:${port}?${params.toString()}#${encodeURIComponent(remark)}`;
+  }
+
+  if (protocol === 'socks') {
+    const auth = profile.user && profile.pass ? `${encodeURIComponent(profile.user)}:${encodeURIComponent(profile.pass)}@` : '';
+    return `socks://${auth}${host}:${port}`;
+  }
+
+  if (protocol === 'http') {
+    const auth = profile.user && profile.pass ? `${encodeURIComponent(profile.user)}:${encodeURIComponent(profile.pass)}@` : '';
+    return `http://${auth}${host}:${port}`;
+  }
+
+  return '';
+}
+
+function inboundMatches(item, queryKey) {
+  if (!item?.enable) return false;
+  const key = String(queryKey || '').trim();
+  if (!key) return false;
+  const profile = parseInboundProfile(item);
+  return profile.authCandidates.includes(key);
+}
+
+function buildUserResult(inbound, node, profile) {
   const host = getUrlHost(node.url);
+  const protocol = String(inbound?.protocol || profile?.protocol || '').trim().toUpperCase();
   return {
     remark: inbound.remark,
     node_name: node.name,
-    protocol: 'SHADOWSOCKS',
+    protocol: protocol || 'UNKNOWN',
     usage: {
       total_used_gb: bytesToGb((Number(inbound.up) || 0) + (Number(inbound.down) || 0)),
       quota_gb: bytesToGb(Number(inbound.total) || 0),
     },
     expiry: parseXuiDate(inbound.expiryTime),
-    subscription_link: buildShadowsocksLink(creds.method, creds.password, host, inbound.port, inbound.remark),
+    subscription_link: buildProtocolLink(inbound, host, profile),
   };
 }
 
@@ -434,8 +724,8 @@ async function findInboundOnNode(node, queryKey, index) {
     throw new Error(`node ${nodeKey(node, index)} not found`);
   }
 
-  const creds = parseClientCredentials(inbound.settings);
-  if (!creds || !creds.method || !creds.password) {
+  const profile = parseInboundProfile(inbound);
+  if (!profile || !profile.protocol) {
     throw new Error(`node ${nodeKey(node, index)} invalid settings`);
   }
 
@@ -444,12 +734,12 @@ async function findInboundOnNode(node, queryKey, index) {
     throw new Error(`node ${nodeKey(node, index)} host missing`);
   }
 
-  return { inbound, creds, session };
+  return { inbound, profile, session };
 }
 
 async function queryNode(node, queryKey, index) {
   const found = await findInboundOnNode(node, queryKey, index);
-  return buildUserResult(found.inbound, node, found.creds);
+  return buildUserResult(found.inbound, node, found.profile);
 }
 
 function buildUpdateForm(inbound, nextExpiryTime) {
@@ -548,10 +838,6 @@ app.post('/api/node/renew', renewLimiter, async (req, res) => {
   if (!codeItem || codeItem.revoked || codeItem.used) {
     return res.status(401).json({ message: '兑换码无效或已使用' });
   }
-  const renewHost = normalizeDomainInput(nodeDomain);
-  if (codeItem.node_host && codeItem.node_host !== renewHost) {
-    return res.status(403).json({ message: '该兑换码不可用于当前节点' });
-  }
 
   let nodes;
   try {
@@ -563,6 +849,15 @@ app.post('/api/node/renew', renewLimiter, async (req, res) => {
   const scopedNodes = pickNodesByDomain(nodes, nodeDomain);
   if (!scopedNodes.length) {
     return res.status(404).json({ message: '未找到该节点域名' });
+  }
+  const renewHost = normalizeDomainInput(nodeDomain);
+  const scopedNodeIds = new Set(scopedNodes.map((node) => String(node?.id || '').trim()).filter(Boolean));
+  if (codeItem.node_id) {
+    if (!scopedNodeIds.has(String(codeItem.node_id).trim())) {
+      return res.status(403).json({ message: '该兑换码不可用于当前节点' });
+    }
+  } else if (codeItem.node_host && codeItem.node_host !== renewHost) {
+    return res.status(403).json({ message: '该兑换码不可用于当前节点' });
   }
 
   try {
@@ -586,7 +881,7 @@ app.post('/api/node/renew', renewLimiter, async (req, res) => {
     };
 
     return res.status(200).json({
-      ...buildUserResult(renewedInbound, found.node, found.creds),
+      ...buildUserResult(renewedInbound, found.node, found.profile),
       renew: {
         months: Number(codeItem.months || 1),
         code: codeItem.code,
@@ -684,9 +979,17 @@ app.post(`${ADMIN_API_BASE}/nodes`, adminLimiter, requireAdminSession, async (re
   if (!Array.isArray(rawNodes)) return res.status(400).json({ message: 'nodes 必须是数组' });
 
   try {
-    const nodes = rawNodes.map((n, i) => normalizeNode(n, i));
+    const prevNodes = await loadNodes().catch(() => []);
+    const normalizedNodes = rawNodes.map((n, i) => normalizeNode(n, i));
+    validateNodeUniqueness(normalizedNodes);
+    const nodes = ensureNodeIds(normalizedNodes, prevNodes);
     await saveNodes(nodes);
-    return res.status(200).json({ message: '节点配置保存成功', count: nodes.length });
+
+    const prevCodes = await loadCodes().catch(() => []);
+    const syncedCodes = syncCodesWithNodes(prevCodes, prevNodes, nodes);
+    await saveCodes(syncedCodes);
+
+    return res.status(200).json({ message: '节点配置保存成功', count: nodes.length, nodes });
   } catch (e) {
     return res.status(400).json({ message: e.message || '节点配置校验失败' });
   }
@@ -789,6 +1092,7 @@ app.post(`${ADMIN_API_BASE}/codes/generate`, adminLimiter, requireAdminSession, 
       const item = {
         code,
         months,
+        node_id: String(bindNode.id || '').trim(),
         node_host: nodeHost,
         node_name: bindNode.name,
         used: false,
