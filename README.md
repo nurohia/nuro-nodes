@@ -94,7 +94,7 @@ rm -rf nuro-nodes
 
 ## 支持的X-UI
 
-### 一键命令(不支持3-UI)
+### 一键命令(不支持3X-UI)
 `bash <(curl -Ls https://raw.githubusercontent.com/vaxilu/x-ui/master/install.sh)`
 
 ### 支持的协议
