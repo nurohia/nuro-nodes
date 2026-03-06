@@ -14,11 +14,11 @@ services:
 
   frontend:
     build:
-      context: ./frontend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: frontend/Dockerfile
       args:
         VITE_API_BASE: ""
-        VITE_ADMIN_PATH_KEY: ${VITE_ADMIN_PATH_KEY:-nuro-admin}
+        VITE_ADMIN_PATH_KEY: ${VITE_ADMIN_PATH_KEY:-}
     depends_on:
       - backend
     restart: unless-stopped

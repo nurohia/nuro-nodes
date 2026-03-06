@@ -12,7 +12,6 @@
 - `backend/nodes.json`
 - `backend/redeem_codes.json`
 - `backend/app_config.json`（可选）
-- `frontend/.env`（本地开发时使用）
 
 `backend/nodes.json` 和 `backend/redeem_codes.json` 已随仓库提供空模板（`[]`），你下载后直接编辑即可。
 
@@ -51,7 +50,7 @@ cd nuro-nodes
 必须确认：
 - `backend/.env` 里的 `ADMIN_PATH_KEY`
 - `backend/.env` 里的 `ADMIN_TOKEN`（或 `ADMIN_TOKEN_SHA256`）
-- `CORS_WHITELIST` 为你的真实前端域名或者服务器IP
+- `CORS_WHITELIST` 为你的服务器IP
 
 ### 3) 启动容器
 ```bash

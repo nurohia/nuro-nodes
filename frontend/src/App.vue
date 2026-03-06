@@ -312,7 +312,17 @@ import { computed, onMounted, ref } from 'vue';
 
 const API_BASE = import.meta.env.VITE_API_BASE || '';
 const ADMIN_PATH_KEY = String(import.meta.env.VITE_ADMIN_PATH_KEY || '').trim();
-const isAdminView = Boolean(ADMIN_PATH_KEY && window.location.pathname === `/${ADMIN_PATH_KEY}`);
+const normalizePathname = (p) => {
+  const raw = String(p || '').trim();
+  if (!raw || raw === '/') return '/';
+  return raw.replace(/\/+$/, '') || '/';
+};
+const adminPath = ADMIN_PATH_KEY ? `/${ADMIN_PATH_KEY}` : '';
+const currentPath = normalizePathname(window.location.pathname);
+if (currentPath !== '/' && currentPath !== adminPath) {
+  window.history.replaceState({}, '', '/');
+}
+const isAdminView = Boolean(ADMIN_PATH_KEY && normalizePathname(window.location.pathname) === adminPath);
 const ADMIN_API_BASE = `${API_BASE}/api/internal/${ADMIN_PATH_KEY}`;
 
 const nodeDomain = ref('');
